@@ -1,4 +1,21 @@
 #include <cstdio>
+#include <rclcpp/rclcpp.hpp>
+
+struct KinematicSoln {
+
+};
+
+class BasicTrajectory : public rclcpp::Node {
+  public:
+    BasicTrajectory() : Node("basic_trajectory"){
+
+    }
+
+
+  private:
+
+
+};
 
 int main(int argc, char ** argv)
 {
