@@ -68,7 +68,7 @@ class BasicTrajectory : public rclcpp::Node {
 
  public:
     std::string getMotorTopic(const std::string& name) {
-        return fmt::format(get_parameter("topic.motor_template").as_string(), get_parameter("name." + name).as_string());
+        return fmt::format(get_parameter("topic.motor_template").as_string(), get_parameter("names." + name).as_string());
     }
 
     BasicTrajectory() : Node("basic_trajectory") {
