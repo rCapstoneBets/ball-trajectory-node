@@ -84,7 +84,7 @@ class BasicTrajectory : public rclcpp::Node {
         declare_parameter("topic.robot_pose", "motor/joint_state");
 
         declare_parameter("range_lut.step", 0.5);
-        declare_parameter("range_lut.values", {});
+        declare_parameter("range_lut.values", std::vector<double>{0.0, 0.5});
         declare_parameter("range_lut.ratio", 0.2794 * 3);
 
         declare_parameter("solver.max_time", 5.0);
@@ -92,7 +92,7 @@ class BasicTrajectory : public rclcpp::Node {
         declare_parameter("solver.run_period", 0.25);
         declare_parameter("solver.min_pose_samples", 10);
 
-        declare_parameter("predict.pose_buffer_len", 300);
+        declare_parameter("predict.max_buffer_len", 300);
 
 
         RCLCPP_DEBUG(get_logger(), "Initializing subscribers");
@@ -109,7 +109,8 @@ class BasicTrajectory : public rclcpp::Node {
         
         RCLCPP_DEBUG(get_logger(), "Initializing timers");
 
-        updateTimer = this->create_wall_timer(std::chrono::duration<double>(solvePeriod), std::bind(&BasicTrajectory::buildOptimTraj, this));        
+        updateTimer = this->create_wall_timer(std::chrono::duration<double>(solvePeriod), std::bind(&BasicTrajectory::buildOptimTraj, this));      
+        updateTimer->cancel();  
         
         RCLCPP_DEBUG(get_logger(), "Initializing publishers");
 
@@ -134,7 +135,7 @@ class BasicTrajectory : public rclcpp::Node {
 
         RCLCPP_DEBUG(get_logger(), "Initializing predictor params");
 
-        predBufferMaxLen = get_parameter("pred.max_buff_len").as_double();
+        predBufferMaxLen = get_parameter("predict.max_buffer_len").as_int();
 
         RCLCPP_INFO(get_logger(), "Trajectory node initalized");
     }
@@ -150,10 +151,11 @@ class BasicTrajectory : public rclcpp::Node {
 
     /**
      * @brief callback to handle all reset code for this node
-     * TODO check if more things need to be reset, but the pose buffer should be the only thing thus far
+     * TODO check if more things need to be reset, but the pose buffer and update timer should be the only thing thus far
      */
     void handleReset(const std_msgs::msg::Empty::SharedPtr){
         relPoseBuffer.clear();
+        updateTimer->cancel();
     }
 
 	/**
@@ -258,15 +260,17 @@ class BasicTrajectory : public rclcpp::Node {
         if(relPoseBuffer.size() > predBufferMaxLen){
             relPoseBuffer.pop_front();
         }
+
+        if(relPoseBuffer.size() < minSamples){
+            RCLCPP_DEBUG(get_logger(), "Pose buffer size too small to build trajectories: %i", relPoseBuffer.size());
+        } else if (updateTimer->is_canceled()){
+            RCLCPP_INFO(get_logger(), "Pose buffer size ready to build trajectories: %i", relPoseBuffer.size());
+            updateTimer->reset();
+        }
     }
 
     void buildOptimTraj(){
-        RCLCPP_DEBUG(get_logger(), "Got new player location");
-
-        if(relPoseBuffer.size() < minSamples){
-            RCLCPP_DEBUG(get_logger(), "Pose buffer size too small: %i", relPoseBuffer.size());
-            return;
-        }
+        RCLCPP_DEBUG(get_logger(), "rebuilding Trajectory");
 
         //seed predicted pose with current pose to generate first possible intercept
         auto predictedPose = relPoseBuffer.at(0);
