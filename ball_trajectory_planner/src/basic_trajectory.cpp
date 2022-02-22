@@ -122,14 +122,12 @@ class BasicTrajectory : public rclcpp::Node {
 
         RCLCPP_DEBUG(get_logger(), "Initializing range lut params");
 
-        // init LUT based on half meter increments
-        
+        // init LUT based on step increments
         wheelRatio = get_parameter("range_lut.ratio").as_double();
         lutStep = 1.0 / get_parameter("range_lut.step").as_double();
 
         auto lutInit = get_parameter("range_lut.values").as_double_array();
         for (int i = 0; i < lutInit.size(); i++) {
-            // convert table units from rpm to rad/s
             rangeLUT.insert({i, lutInit.at(i)});
         }
 
