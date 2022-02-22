@@ -16,7 +16,17 @@
 
 using std::placeholders::_1;
 
+/**
+ * @brief data struct for holding a kinematic solution to the problem before
+ * it becomes a joint state
+ * 
+ */
 struct KinematicSoln {
+    double range;
+    double ballVel;
+    double elevAngle;
+    double azmuithAngle;
+    double timeDelta;
 };
 
 class BasicTrajectory : public rclcpp::Node {
@@ -34,7 +44,10 @@ class BasicTrajectory : public rclcpp::Node {
     // range lookup table for wheel velocity bands
     // input is range in m (rounded to 0.5 m increments)
     std::map<double, double> rangeLUT = {};
-    double lutStep = 0.5;
+    double lutStep = 0.5, wheelRatio;
+    
+    // solver parameters 
+    double maxSolve, solveStep;
 
 	std::vector<geometry_msgs::msg::Pose> relPoseBuffer;
 
@@ -59,6 +72,11 @@ class BasicTrajectory : public rclcpp::Node {
 
         declare_parameter("range_lut.step", 0.5);
         declare_parameter("range_lut.values", {});
+        declare_parameter("range_lut.ratio", 0.2794 * 3);
+
+        declare_parameter("solver.max_time", 5.0);
+        declare_parameter("solver.time_step", 0.2);
+
 
         RCLCPP_DEBUG(get_logger(), "Initializing player pose and robot joint state subscribers");
         playerPoseSub = this->create_subscription<geometry_msgs::msg::Pose>(get_parameter("topic.player_pose").as_string(), rclcpp::SensorDataQoS(), std::bind(&BasicTrajectory::newPlayerPoseData, this, _1));
@@ -75,12 +93,19 @@ class BasicTrajectory : public rclcpp::Node {
         RCLCPP_DEBUG(get_logger(), "Initializing range lut");
 
         // init LUT based on half meter increments
+        
+        wheelRatio = get_parameter("range_lut.ratio").as_double();
+        lutStep = 1.0 / get_parameter("range_lut.step").as_double();
+
         auto lutInit = get_parameter("range_lut.values").as_double_array();
-        auto lutStep = 1.0 / get_parameter("range_lut.step").as_double();
         for (int i = 0; i < lutInit.size(); i++) {
             // convert table units from rpm to rad/s
-            rangeLUT.insert({i, lutInit.at(i) / (2 * M_PI) * 60.0});
+            rangeLUT.insert({i, lutInit.at(i)});
         }
+
+        RCLCPP_DEBUG(get_logger(), "Initializing solver");
+
+        maxSolve = get_parameter("solver.max_time").as_double();
 
         RCLCPP_INFO(get_logger(), "Trajectory node initalized");
     }
@@ -122,8 +147,7 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @param ballVel velocity of the ball leaving the system in m/s
 	 * @return double elevation angle in radians
 	 */
-    double getElevationAngle(const geometry_msgs::msg::Pose::SharedPtr relPose, double ballVel) {
-		auto range = getRange(relPose);
+    double getElevationAngle(const geometry_msgs::msg::Pose::SharedPtr relPose, double ballVel, double range) {
 		return std::atan(ballVel * ballVel - std::sqrt(std::pow(ballVel, 4) - GRAV * (GRAV * range * range + 2 * ballVel * ballVel * relPose->position.z) / (GRAV * range)));
 	}
 
@@ -136,19 +160,34 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @param ballVel velocity the ball will leave the system at
 	 * @return double time of ball flight in seconds
 	 */
-    double calcTof(double zDelta, double elevAngle, double ballVel) {
-        return (ballVel * std::sin(elevAngle)) / GRAV + std::sqrt(ballVel * ballVel * std::sin(elevAngle) + 2 * GRAV * zDelta) / GRAV;
+    double getTof(const geometry_msgs::msg::Pose::SharedPtr relPose, double elevAngle, double ballVel) {
+        return (ballVel * std::sin(elevAngle)) / GRAV + std::sqrt(ballVel * ballVel * std::sin(elevAngle) + 2 * GRAV * relPose->position.z) / GRAV;
     }
 
     /**
      * @brief uses the LUT to convert lateral range to angular velocity of the wheel system
      *
      * @param range the range of the shot in meters
-     * @return double the output velocity of the flywheels in rad/s
+     * @return double the output velocity of the flywheels in m/s
      */
-    double lookupAngVel(double range) {
+    double lookupBallVel(double range) {
         int step = (int)(range / lutStep);
         return rangeLUT.at(step);
+    }
+
+    double linearVeltoAngVel(double linear){
+
+    }
+
+    KinematicSoln calcToTarget(const geometry_msgs::msg::Pose::SharedPtr newPose) {
+        auto soln = KinematicSoln();
+        soln.range = getRange(newPose);
+        soln.ballVel = lookupBallVel(soln.range);
+        soln.azmuithAngle = getAzmuithAngle(newPose);
+        soln.elevAngle = getElevationAngle(newPose, soln.ballVel, soln.range);
+        soln.timeDelta = getTof(newPose, soln.elevAngle, soln.ballVel);
+        
+        return soln;
     }
 
 	/**
@@ -168,14 +207,70 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @param newPose 
 	 */
 	void newPlayerPoseData(const geometry_msgs::msg::Pose::SharedPtr newPose) {
-        RCLCPP_DEBUG(get_logger(), "Got new relative player location");
+        RCLCPP_DEBUG(get_logger(), "Got new player location");
 
+        //seed predicted pose with current pose to generate first possible intercept
+        auto predictedPose = newPose;
 
+        // compute the intial solution
+        auto solution = calcToTarget(predictedPose);
+
+        RCLCPP_DEBUG(get_logger(), "First intercept time: %f", solution.timeDelta);
+
+        // start at t = timedelta as it is the closest possible solution
+        // computing anything earlier than this would produce waste
+        double tPredict = solution.timeDelta;
+
+        // true while the intercept point has not yet been found
+        bool noInt = true;
+
+        // make sure looop has 2 exlpicit exit conditions for finding a solution, and for timing out
+        while(noInt && tPredict <= maxSolve){
+
+            // bump the solve step to the next increment
+            tPredict += solveStep;
+
+            // guess the players new position based on the old, the local buffer, and the time to extrapolate to
+            predictedPose = predictPlayerPose(tPredict, predictedPose);
+            RCLCPP_DEBUG(get_logger(), "Player predicted %fs to (X: %f, Y: %f)", tPredict, predictedPose->position.x, predictedPose->position.y);
+
+            // find the new solution
+            solution = calcToTarget(predictedPose);  
+
+            RCLCPP_DEBUG(get_logger(), "New intercept time: %f", solution.timeDelta);
+
+            // evaluate exit condition. algo 
+            noInt = solution.timeDelta > tPredict;          
+            
+        }
+        if(noInt){
+            RCLCPP_ERROR(get_logger(), "Could not find solution to (X: %f, Y: %f) within time delta of %f", 
+                predictedPose->position.x, predictedPose->position.y, maxSolve);
+        } else {
+            // got a valid solution here, lets send it to the machine
+            RCLCPP_INFO(get_logger(), "Got valid soln, moving robot!");
+
+            auto angWheelVel = linearVeltoAngVel(solution.ballVel);
+
+            auto panMsg = can_msgs::msg::MotorMsg();
+            panMsg.control_mode = 1;
+            panMsg.demand = solution.azmuithAngle;
+            panMotor->publish(panMsg);
+
+            auto tiltMsg = can_msgs::msg::MotorMsg();
+            tiltMsg.control_mode = 1;
+            tiltMsg.demand = solution.azmuithAngle;
+            tiltMotor->publish(tiltMsg);
+
+            auto wheelMsg = can_msgs::msg::MotorMsg();
+            tiltMsg.control_mode = 2;
+            tiltMsg.demand = angWheelVel;
+            leftWheel->publish(wheelMsg);
+            rightWheel->publish(wheelMsg);
+
+        }
     }
 
-    void calcToTarget() {
-
-    }
 };
 
 int main(int argc, char** argv) {
