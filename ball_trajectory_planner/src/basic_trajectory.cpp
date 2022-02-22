@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 #include <map>
+#include <deque>
+#include <chrono>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -11,6 +13,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/empty.hpp>
 
 #define GRAV 9.81
 
@@ -37,6 +40,12 @@ class BasicTrajectory : public rclcpp::Node {
     // subscriber for last robot pose
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr robotPoseSub;
 
+    // subscriber to cause a reset of the node
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr resetSub;
+
+    // timer to create a new trajectory
+    rclcpp::TimerBase::SharedPtr updateTimer; 
+
     // publishers of joint information
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr jointPub;
     rclcpp::Publisher<can_msgs::msg::MotorMsg>::SharedPtr leftWheel, rightWheel, panMotor, tiltMotor;
@@ -47,9 +56,13 @@ class BasicTrajectory : public rclcpp::Node {
     double lutStep = 0.5, wheelRatio;
     
     // solver parameters 
-    double maxSolve, solveStep;
+    double maxSolve, solveStep, solvePeriod;
+    int minSamples;
 
-	std::vector<geometry_msgs::msg::Pose> relPoseBuffer;
+    // predictor parameters
+    double predBufferMaxLen = 10;
+
+	std::deque<geometry_msgs::msg::Pose::SharedPtr> relPoseBuffer;
 
     sensor_msgs::msg::JointState::SharedPtr lastRobotPose;
 
@@ -76,12 +89,28 @@ class BasicTrajectory : public rclcpp::Node {
 
         declare_parameter("solver.max_time", 5.0);
         declare_parameter("solver.time_step", 0.2);
+        declare_parameter("solver.run_period", 0.25);
+        declare_parameter("solver.min_pose_samples", 10);
+
+        declare_parameter("predict.pose_buffer_len", 300);
 
 
-        RCLCPP_DEBUG(get_logger(), "Initializing player pose and robot joint state subscribers");
+        RCLCPP_DEBUG(get_logger(), "Initializing subscribers");
         playerPoseSub = this->create_subscription<geometry_msgs::msg::Pose>(get_parameter("topic.player_pose").as_string(), rclcpp::SensorDataQoS(), std::bind(&BasicTrajectory::newPlayerPoseData, this, _1));
         robotPoseSub = this->create_subscription<sensor_msgs::msg::JointState>(get_parameter("topic.robot_pose").as_string(), rclcpp::SensorDataQoS(), std::bind(&BasicTrajectory::newRobotPoseData, this, _1));
+        resetSub = this->create_subscription<std_msgs::msg::Empty>("/sys/reset", rclcpp::SystemDefaultsQoS(), std::bind(&BasicTrajectory::handleReset, this, _1));
 
+        RCLCPP_DEBUG(get_logger(), "Initializing solver params");
+
+        maxSolve = get_parameter("solver.max_time").as_double();
+        solveStep = get_parameter("solver.time_step").as_double();
+        solvePeriod = get_parameter("solver.run_period").as_double();
+        minSamples = get_parameter("solver.min_pose_samples").as_int();
+        
+        RCLCPP_DEBUG(get_logger(), "Initializing timers");
+
+        updateTimer = this->create_wall_timer(std::chrono::duration<double>(solvePeriod), std::bind(&BasicTrajectory::buildOptimTraj, this));        
+        
         RCLCPP_DEBUG(get_logger(), "Initializing publishers");
 
         jointPub = this->create_publisher<sensor_msgs::msg::JointState>("trajectory/desired_state", rclcpp::SystemDefaultsQoS());
@@ -90,7 +119,7 @@ class BasicTrajectory : public rclcpp::Node {
         panMotor = this->create_publisher<can_msgs::msg::MotorMsg>(getMotorTopic("pan_motor"), rclcpp::SystemDefaultsQoS());
         tiltMotor = this->create_publisher<can_msgs::msg::MotorMsg>(getMotorTopic("tilt_motor"), rclcpp::SystemDefaultsQoS());
 
-        RCLCPP_DEBUG(get_logger(), "Initializing range lut");
+        RCLCPP_DEBUG(get_logger(), "Initializing range lut params");
 
         // init LUT based on half meter increments
         
@@ -103,9 +132,9 @@ class BasicTrajectory : public rclcpp::Node {
             rangeLUT.insert({i, lutInit.at(i)});
         }
 
-        RCLCPP_DEBUG(get_logger(), "Initializing solver");
+        RCLCPP_DEBUG(get_logger(), "Initializing predictor params");
 
-        maxSolve = get_parameter("solver.max_time").as_double();
+        predBufferMaxLen = get_parameter("pred.max_buff_len").as_double();
 
         RCLCPP_INFO(get_logger(), "Trajectory node initalized");
     }
@@ -117,6 +146,14 @@ class BasicTrajectory : public rclcpp::Node {
 	 */
 	void newRobotPoseData(const sensor_msgs::msg::JointState::SharedPtr newPose) {
         lastRobotPose = newPose;
+    }
+
+    /**
+     * @brief callback to handle all reset code for this node
+     * TODO check if more things need to be reset, but the pose buffer should be the only thing thus far
+     */
+    void handleReset(const std_msgs::msg::Empty::SharedPtr){
+        relPoseBuffer.clear();
     }
 
 	/**
@@ -176,7 +213,7 @@ class BasicTrajectory : public rclcpp::Node {
     }
 
     double linearVeltoAngVel(double linear){
-
+        return linear / wheelRatio;
     }
 
     KinematicSoln calcToTarget(const geometry_msgs::msg::Pose::SharedPtr newPose) {
@@ -198,7 +235,16 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @return geometry_msgs::msg::Pose::SharedPtr 
 	 */
 	geometry_msgs::msg::Pose::SharedPtr predictPlayerPose(double tDelta, const geometry_msgs::msg::Pose::SharedPtr currentPose){
+        //TODO not sure how to do this part yet...
+        
+        // could either linearly interp fwd in time
 
+        // or could try to fit a trajectory to the path of the user
+
+        // maybe both, depending on large t vs small t
+        
+        // NOTE FOR NOW THIS IS JUST A PASS THROUGH TO TEST THE OPTIM ALGORITHM
+        return currentPose;
 	}
 
 	/**
@@ -207,10 +253,23 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @param newPose 
 	 */
 	void newPlayerPoseData(const geometry_msgs::msg::Pose::SharedPtr newPose) {
+        relPoseBuffer.push_back(newPose);
+
+        if(relPoseBuffer.size() > predBufferMaxLen){
+            relPoseBuffer.pop_front();
+        }
+    }
+
+    void buildOptimTraj(){
         RCLCPP_DEBUG(get_logger(), "Got new player location");
 
+        if(relPoseBuffer.size() < minSamples){
+            RCLCPP_DEBUG(get_logger(), "Pose buffer size too small: %i", relPoseBuffer.size());
+            return;
+        }
+
         //seed predicted pose with current pose to generate first possible intercept
-        auto predictedPose = newPose;
+        auto predictedPose = relPoseBuffer.at(0);
 
         // compute the intial solution
         auto solution = calcToTarget(predictedPose);
