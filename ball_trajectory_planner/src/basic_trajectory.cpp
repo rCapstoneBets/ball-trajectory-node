@@ -64,8 +64,6 @@ class BasicTrajectory : public rclcpp::Node {
 
 	std::deque<geometry_msgs::msg::Pose::SharedPtr> relPoseBuffer;
 
-    sensor_msgs::msg::JointState::SharedPtr lastRobotPose;
-
  public:
     std::string getMotorTopic(const std::string& name) {
         return fmt::format(get_parameter("topic.motor_template").as_string(), get_parameter("names." + name).as_string());
@@ -97,7 +95,6 @@ class BasicTrajectory : public rclcpp::Node {
 
         RCLCPP_DEBUG(get_logger(), "Initializing subscribers");
         playerPoseSub = this->create_subscription<geometry_msgs::msg::Pose>(get_parameter("topic.player_pose").as_string(), rclcpp::SensorDataQoS(), std::bind(&BasicTrajectory::newPlayerPoseData, this, _1));
-        robotPoseSub = this->create_subscription<sensor_msgs::msg::JointState>(get_parameter("topic.robot_pose").as_string(), rclcpp::SensorDataQoS(), std::bind(&BasicTrajectory::newRobotPoseData, this, _1));
         resetSub = this->create_subscription<std_msgs::msg::Empty>("/sys/reset", rclcpp::SystemDefaultsQoS(), std::bind(&BasicTrajectory::handleReset, this, _1));
 
         RCLCPP_DEBUG(get_logger(), "Initializing solver params");
@@ -136,15 +133,6 @@ class BasicTrajectory : public rclcpp::Node {
         predBufferMaxLen = get_parameter("predict.max_buffer_len").as_int();
 
         RCLCPP_INFO(get_logger(), "Trajectory node initalized");
-    }
-
-	/**
-	 * @brief callback for the robot joint position information
-	 * 
-	 * @param newPose the current position of the robot joints
-	 */
-	void newRobotPoseData(const sensor_msgs::msg::JointState::SharedPtr newPose) {
-        lastRobotPose = newPose;
     }
 
     /**
@@ -228,26 +216,6 @@ class BasicTrajectory : public rclcpp::Node {
     }
 
 	/**
-	 * @brief extrapolate the players postion into the futrure by specified time tDelta
-	 * 
-	 * @param tDelta 
-	 * @param currentPose 
-	 * @return geometry_msgs::msg::Pose::SharedPtr 
-	 */
-	geometry_msgs::msg::Pose::SharedPtr predictPlayerPose(double tDelta, const geometry_msgs::msg::Pose::SharedPtr currentPose){
-        //TODO not sure how to do this part yet...
-        
-        // could either linearly interp fwd in time
-
-        // or could try to fit a trajectory to the path of the user
-
-        // maybe both, depending on large t vs small t
-        
-        // NOTE FOR NOW THIS IS JUST A PASS THROUGH TO TEST THE OPTIM ALGORITHM
-        return currentPose;
-	}
-
-	/**
 	 * @brief recieve new information about the player position
 	 * 
 	 * @param newPose 
@@ -278,58 +246,25 @@ class BasicTrajectory : public rclcpp::Node {
 
         RCLCPP_DEBUG(get_logger(), "First intercept time: %f", solution.timeDelta);
 
-        // start at t = timedelta as it is the closest possible solution
-        // computing anything earlier than this would produce waste
-        double tPredict = solution.timeDelta;
+        RCLCPP_INFO(get_logger(), "Got valid soln, moving robot!");
 
-        // true while the intercept point has not yet been found
-        bool noInt = true;
+        auto angWheelVel = linearVeltoAngVel(solution.ballVel);
 
-        // make sure looop has 2 exlpicit exit conditions for finding a solution, and for timing out
-        while(noInt && tPredict <= maxSolve){
+        auto panMsg = can_msgs::msg::MotorMsg();
+        panMsg.control_mode = 1;
+        panMsg.demand = solution.azmuithAngle;
+        panMotor->publish(panMsg);
 
-            // bump the solve step to the next increment
-            tPredict += solveStep;
+        auto tiltMsg = can_msgs::msg::MotorMsg();
+        tiltMsg.control_mode = 1;
+        tiltMsg.demand = solution.azmuithAngle;
+        tiltMotor->publish(tiltMsg);
 
-            // guess the players new position based on the old, the local buffer, and the time to extrapolate to
-            predictedPose = predictPlayerPose(tPredict, predictedPose);
-            RCLCPP_DEBUG(get_logger(), "Player predicted %fs to (X: %f, Y: %f)", tPredict, predictedPose->position.x, predictedPose->position.y);
-
-            // find the new solution
-            solution = calcToTarget(predictedPose);  
-
-            RCLCPP_DEBUG(get_logger(), "New intercept time: %f", solution.timeDelta);
-
-            // evaluate exit condition. algo 
-            noInt = solution.timeDelta > tPredict;          
-            
-        }
-        if(noInt){
-            RCLCPP_ERROR(get_logger(), "Could not find solution to (X: %f, Y: %f) within time delta of %f", 
-                predictedPose->position.x, predictedPose->position.y, maxSolve);
-        } else {
-            // got a valid solution here, lets send it to the machine
-            RCLCPP_INFO(get_logger(), "Got valid soln, moving robot!");
-
-            auto angWheelVel = linearVeltoAngVel(solution.ballVel);
-
-            auto panMsg = can_msgs::msg::MotorMsg();
-            panMsg.control_mode = 1;
-            panMsg.demand = solution.azmuithAngle;
-            panMotor->publish(panMsg);
-
-            auto tiltMsg = can_msgs::msg::MotorMsg();
-            tiltMsg.control_mode = 1;
-            tiltMsg.demand = solution.azmuithAngle;
-            tiltMotor->publish(tiltMsg);
-
-            auto wheelMsg = can_msgs::msg::MotorMsg();
-            tiltMsg.control_mode = 2;
-            tiltMsg.demand = angWheelVel;
-            leftWheel->publish(wheelMsg);
-            rightWheel->publish(wheelMsg);
-
-        }
+        auto wheelMsg = can_msgs::msg::MotorMsg();
+        tiltMsg.control_mode = 2;
+        tiltMsg.demand = angWheelVel;
+        leftWheel->publish(wheelMsg);
+        rightWheel->publish(wheelMsg);
     }
 
 };
