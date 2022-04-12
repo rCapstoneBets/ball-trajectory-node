@@ -6,16 +6,23 @@
       right_wheel_motor: right_wheel_motor
       tilt_motor: tilt_motor
     predict:
-      max_buffer_len: 300
+      max_buffer_len: 2
     range_lut:
       ratio: 0.8382
-      step: 0.5
-      values:
-      - 0.0
-      - 0.5
+      step: 2.5
+      values: # range
+      - 0.0 # 0.0m
+      - 2.5 # 2.5m
+      - 5.0 # 5.0m
+      - 7.5 # 7.5m
+      - 10.0 # 10.0m
+      - 12.5 # 12.5m
+      - 15.0 # 15.0m
+      - 17.5 # 17.5m
+      - 20.0 # 20.0m
     solver:
       max_time: 5.0
-      min_pose_samples: 10
+      min_pose_samples: 1
       run_period: 0.25
       time_step: 0.2
     topic:

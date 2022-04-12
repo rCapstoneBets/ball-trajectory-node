@@ -48,7 +48,6 @@ class BasicTrajectory : public rclcpp::Node {
 
     // publishers of joint information
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr jointPub;
-    rclcpp::Publisher<can_msgs::msg::MotorMsg>::SharedPtr leftWheel, rightWheel, panMotor, tiltMotor;
 
     // range lookup table for wheel velocity bands
     // input is range in m (rounded to 0.5 m increments)
@@ -65,30 +64,17 @@ class BasicTrajectory : public rclcpp::Node {
 	std::deque<geometry_msgs::msg::Pose::SharedPtr> relPoseBuffer;
 
  public:
-    std::string getMotorTopic(const std::string& name) {
-        return fmt::format(get_parameter("topic.motor_template").as_string(), get_parameter("names." + name).as_string());
-    }
-
     BasicTrajectory() : Node("basic_trajectory") {
         RCLCPP_DEBUG(get_logger(), "Initializing parameters");
 
-        declare_parameter("names.left_wheel_motor", "left_wheel_motor");
-        declare_parameter("names.right_wheel_motor", "right_wheel_motor");
-        declare_parameter("names.pan_motor", "pan_motor");
-        declare_parameter("names.tilt_motor", "tilt_motor");
-
-        declare_parameter("topic.motor_template", "motor/{}/demand");
         declare_parameter("topic.player_pose", "player/pose");
-        declare_parameter("topic.robot_pose", "motor/joint_state");
 
         declare_parameter("range_lut.step", 0.5);
         declare_parameter("range_lut.values", std::vector<double>{0.0, 0.5});
         declare_parameter("range_lut.ratio", 0.2794 * 3);
 
-        declare_parameter("solver.max_time", 5.0);
-        declare_parameter("solver.time_step", 0.2);
         declare_parameter("solver.run_period", 0.25);
-        declare_parameter("solver.min_pose_samples", 10);
+        declare_parameter("solver.min_pose_samples", 1);
 
         declare_parameter("predict.max_buffer_len", 300);
 
@@ -99,8 +85,6 @@ class BasicTrajectory : public rclcpp::Node {
 
         RCLCPP_DEBUG(get_logger(), "Initializing solver params");
 
-        maxSolve = get_parameter("solver.max_time").as_double();
-        solveStep = get_parameter("solver.time_step").as_double();
         solvePeriod = get_parameter("solver.run_period").as_double();
         minSamples = get_parameter("solver.min_pose_samples").as_int();
         
@@ -112,21 +96,19 @@ class BasicTrajectory : public rclcpp::Node {
         RCLCPP_DEBUG(get_logger(), "Initializing publishers");
 
         jointPub = this->create_publisher<sensor_msgs::msg::JointState>("trajectory/desired_state", rclcpp::SystemDefaultsQoS());
-        leftWheel = this->create_publisher<can_msgs::msg::MotorMsg>(getMotorTopic("left_wheel_motor"), rclcpp::SystemDefaultsQoS());
-        rightWheel = this->create_publisher<can_msgs::msg::MotorMsg>(getMotorTopic("right_wheel_motor"), rclcpp::SystemDefaultsQoS());
-        panMotor = this->create_publisher<can_msgs::msg::MotorMsg>(getMotorTopic("pan_motor"), rclcpp::SystemDefaultsQoS());
-        tiltMotor = this->create_publisher<can_msgs::msg::MotorMsg>(getMotorTopic("tilt_motor"), rclcpp::SystemDefaultsQoS());
 
         RCLCPP_DEBUG(get_logger(), "Initializing range lut params");
 
         // init LUT based on step increments
         wheelRatio = get_parameter("range_lut.ratio").as_double();
-        lutStep = 1.0 / get_parameter("range_lut.step").as_double();
+        lutStep = get_parameter("range_lut.step").as_double();
 
         auto lutInit = get_parameter("range_lut.values").as_double_array();
         for (int i = 0; i < lutInit.size(); i++) {
             rangeLUT.insert({i, lutInit.at(i)});
         }
+
+        RCLCPP_INFO(get_logger(), "Using LUT step value of %f m / value with max range of %f m", lutStep, lutStep * rangeLUT.size());
 
         RCLCPP_DEBUG(get_logger(), "Initializing predictor params");
 
@@ -173,7 +155,12 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @return double elevation angle in radians
 	 */
     double getElevationAngle(const geometry_msgs::msg::Pose::SharedPtr relPose, double ballVel, double range) {
-		return std::atan(ballVel * ballVel - std::sqrt(std::pow(ballVel, 4) - GRAV * (GRAV * range * range + 2 * ballVel * ballVel * relPose->position.z) / (GRAV * range)));
+        double quadratic = ballVel * ballVel - std::sqrt(std::pow(ballVel, 4) - GRAV * (GRAV * range * range + 2 * ballVel * ballVel * relPose->position.z) / (GRAV * range));
+        if(std::isnan(quadratic)){
+            RCLCPP_ERROR(get_logger(), "No valid trajectory exists with given point and veloicty limits");
+            return 0.0;
+        }  
+		return std::atan(quadratic);
 	}
 
 	/**
@@ -197,6 +184,10 @@ class BasicTrajectory : public rclcpp::Node {
      */
     double lookupBallVel(double range) {
         int step = (int)(range / lutStep);
+        if(step > rangeLUT.size()){
+            RCLCPP_ERROR(get_logger(), "Range outside of Lookup table, got value: %i with LUT size: %i for range %f", step, rangeLUT.size(), range);
+            return rangeLUT.at(rangeLUT.size() - 1);
+        }
         return rangeLUT.at(step);
     }
 
@@ -246,25 +237,18 @@ class BasicTrajectory : public rclcpp::Node {
 
         RCLCPP_DEBUG(get_logger(), "First intercept time: %f", solution.timeDelta);
 
-        RCLCPP_INFO(get_logger(), "Got valid soln, moving robot!");
+        // RCLCPP_INFO(get_logger(), "Got valid soln, moving robot!");
 
         auto angWheelVel = linearVeltoAngVel(solution.ballVel);
 
-        auto panMsg = can_msgs::msg::MotorMsg();
-        panMsg.control_mode = 1;
-        panMsg.demand = solution.azmuithAngle;
-        panMotor->publish(panMsg);
+        auto jointState = sensor_msgs::msg::JointState();
 
-        auto tiltMsg = can_msgs::msg::MotorMsg();
-        tiltMsg.control_mode = 1;
-        tiltMsg.demand = solution.azmuithAngle;
-        tiltMotor->publish(tiltMsg);
+        jointState.name = {"pan_motor", "tilt_motor", "left_wheel_motor", "right_wheel_motor"};
+        jointState.position = {solution.azmuithAngle, solution.elevAngle, 0.0, 0.0};
+        jointState.velocity = {0.0, 0.0, angWheelVel, angWheelVel};
+        jointState.effort = {0.0, 0.0, 0.0, 0.0};
 
-        auto wheelMsg = can_msgs::msg::MotorMsg();
-        tiltMsg.control_mode = 2;
-        tiltMsg.demand = angWheelVel;
-        leftWheel->publish(wheelMsg);
-        rightWheel->publish(wheelMsg);
+        jointPub->publish(jointState);
     }
 
 };
