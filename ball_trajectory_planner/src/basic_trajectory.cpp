@@ -14,6 +14,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/int8.hpp>
 
 #define GRAV 9.81
 
@@ -48,6 +49,8 @@ class BasicTrajectory : public rclcpp::Node {
 
     // publishers of joint information
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr jointPub;
+    rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr jointValid;
+    std_msgs::msg::Int8 validMsg;
 
     // range lookup table for wheel velocity bands
     // input is range in m (rounded to 0.5 m increments)
@@ -96,6 +99,8 @@ class BasicTrajectory : public rclcpp::Node {
         RCLCPP_DEBUG(get_logger(), "Initializing publishers");
 
         jointPub = this->create_publisher<sensor_msgs::msg::JointState>("trajectory/desired_state", rclcpp::SystemDefaultsQoS());
+        jointValid = this->create_publisher<std_msgs::msg::Int8>("trajectory/valid", rclcpp::SystemDefaultsQoS());
+        validMsg = std_msgs::msg::Int8();
 
         RCLCPP_DEBUG(get_logger(), "Initializing range lut params");
 
@@ -155,12 +160,12 @@ class BasicTrajectory : public rclcpp::Node {
 	 * @return double elevation angle in radians
 	 */
     double getElevationAngle(const geometry_msgs::msg::Pose::SharedPtr relPose, double ballVel, double range) {
-        double quadratic = ballVel * ballVel - std::sqrt(std::pow(ballVel, 4) - GRAV * (GRAV * range * range + 2 * ballVel * ballVel * relPose->position.z) / (GRAV * range));
-        if(std::isnan(quadratic)){
-            RCLCPP_ERROR(get_logger(), "No valid trajectory exists with given point and veloicty limits");
-            return 0.0;
-        }  
-		return std::atan(quadratic);
+        double speedSq = ballVel * ballVel;
+        double speedQu = std::pow(ballVel, 4);
+        double root = speedQu - GRAV * (GRAV * range * range + 2 * speedSq * relPose->position.z);
+
+        // The minus sign here should give the lower solution (less than 45)
+		return std::atan2(speedSq - std::sqrt(root), (GRAV * range));
 	}
 
 	/**
@@ -200,7 +205,8 @@ class BasicTrajectory : public rclcpp::Node {
         soln.range = getRange(newPose);
         soln.ballVel = lookupBallVel(soln.range);
         soln.azmuithAngle = getAzmuithAngle(newPose);
-        soln.elevAngle = getElevationAngle(newPose, soln.ballVel, soln.range);
+        // have to negate the elevation angle to force the robot to tilt backwards
+        soln.elevAngle = -getElevationAngle(newPose, soln.ballVel, soln.range);
         soln.timeDelta = getTof(newPose, soln.elevAngle, soln.ballVel);
         
         return soln;
@@ -234,7 +240,25 @@ class BasicTrajectory : public rclcpp::Node {
 
         // compute the intial solution
         auto solution = calcToTarget(predictedPose);
+        // Check if trajectory was generated okay
+        if(std::isnan(solution.elevAngle)){
+            // only print on first invalid
+            if(validMsg.data != -1) 
+            RCLCPP_ERROR(get_logger(), "No valid trajectory exists with given point [%f, %f, %f] and veloicty limits",
+                 predictedPose->position.x, predictedPose->position.y, predictedPose->position.z);
 
+            validMsg.data = -1;
+            jointValid->publish(validMsg);
+            return;
+        } else if (validMsg.data == -1){
+            RCLCPP_WARN(get_logger(), "Found valid trajectory with given point [%f, %f, %f]", 
+                predictedPose->position.x, predictedPose->position.y, predictedPose->position.z);
+        }
+
+        validMsg.data = 0;
+        jointValid->publish(validMsg);
+
+        // Continue if trajectory is valid
         RCLCPP_DEBUG(get_logger(), "First intercept time: %f", solution.timeDelta);
 
         // RCLCPP_INFO(get_logger(), "Got valid soln, moving robot!");
