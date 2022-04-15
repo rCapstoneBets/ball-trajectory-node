@@ -197,7 +197,7 @@ class BasicTrajectory : public rclcpp::Node {
     }
 
     double linearVeltoAngVel(double linear){
-        return linear / wheelRatio;
+        return linear * wheelRatio;
     }
 
     KinematicSoln calcToTarget(const geometry_msgs::msg::Pose::SharedPtr newPose) {
@@ -206,7 +206,7 @@ class BasicTrajectory : public rclcpp::Node {
         soln.ballVel = lookupBallVel(soln.range);
         soln.azmuithAngle = getAzmuithAngle(newPose);
         // have to negate the elevation angle to force the robot to tilt backwards
-        soln.elevAngle = -getElevationAngle(newPose, soln.ballVel, soln.range);
+        soln.elevAngle = getElevationAngle(newPose, soln.ballVel, soln.range);
         soln.timeDelta = getTof(newPose, soln.elevAngle, soln.ballVel);
         
         return soln;
@@ -268,7 +268,7 @@ class BasicTrajectory : public rclcpp::Node {
         auto jointState = sensor_msgs::msg::JointState();
 
         jointState.name = {"pan_motor", "tilt_motor", "left_wheel_motor", "right_wheel_motor"};
-        jointState.position = {solution.azmuithAngle, solution.elevAngle, 0.0, 0.0};
+        jointState.position = {solution.azmuithAngle, -solution.elevAngle, 0.0, 0.0};
         jointState.velocity = {0.0, 0.0, angWheelVel, angWheelVel};
         jointState.effort = {0.0, 0.0, 0.0, 0.0};
 

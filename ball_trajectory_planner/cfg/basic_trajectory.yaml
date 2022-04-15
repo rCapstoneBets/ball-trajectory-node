@@ -8,7 +8,7 @@
     predict:
       max_buffer_len: 2
     range_lut:
-      ratio: 1.0 # 0.8382
+      ratio: 20.0 #guess for now
       step: 1.0
       values: # range
       - 2.5 # 0.0m
