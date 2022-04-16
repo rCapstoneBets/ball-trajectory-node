@@ -53,7 +53,7 @@ class BasicTrajectory : public rclcpp::Node {
     // range lookup table for wheel velocity bands
     // input is range in m (rounded to 0.5 m increments)
     std::map<double, double> rangeLUT = {};
-    double lutStep = 0.5, wheelRatio;
+    double rangeLutStep = 0.5, wheelRatio;
     
     // solver parameters 
     double maxSolve, solveStep, solvePeriod;
@@ -124,7 +124,7 @@ class BasicTrajectory : public rclcpp::Node {
 
         // init LUT based on step increments
         wheelRatio = get_parameter("range_lut.ratio").as_double();
-        lutStep = 1.0 / get_parameter("range_lut.step").as_double();
+        rangeLutStep = 1.0 / get_parameter("range_lut.step").as_double();
 
         auto lutInit = get_parameter("range_lut.values").as_double_array();
         for (int i = 0; i < lutInit.size(); i++) {
@@ -208,7 +208,7 @@ class BasicTrajectory : public rclcpp::Node {
      * @return double the output velocity of the flywheels in m/s
      */
     double lookupBallVel(double range) {
-        int step = (int)(range / lutStep);
+        int step = (int)(range / rangeLutStep);
         return rangeLUT.at(step);
     }
 

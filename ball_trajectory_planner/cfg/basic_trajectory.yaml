@@ -8,10 +8,9 @@
     predict:
       max_buffer_len: 2
     range_lut:
-      ratio: 12.0 #guess for now
-      step: 1.0
+      step: 1.0 # m between values starting at zero
       values: # range
-      - 2.5 # 0.0m
+      - 2.5 # requested velocity at x range
       - 4.5 # 1.0m
       - 6.5 # 2.0m
       - 8.5 # 3.0m
@@ -33,10 +32,25 @@
       - 38.5 # 19.0m
       - 38.5 # 20.0m
 
+    vel_lut:
+      step: 4.0 # m/s requested between values
+      values: # maps m /s to radians at the motor
+      - 11.0 # 00 m/s
+      - 11.5 # 04 m/s
+      - 12.0 # 08 m/s
+      - 12.5 # 12 m/s
+      - 13.0 # 16 m/s
+      - 13.5 # 20 m/s
+      - 14.0 # 24 m/s
+      - 15.0 # 28 m/s
+      - 16.0 # 32 m/s
+      - 17.0 # 36 m/s
+      - 18.0 # 40 m/s
+
     solver:
       max_time: 5.0
       min_pose_samples: 1
-      run_period: 0.1
+      run_period: 0.05
       time_step: 0.2
     topic:
       motor_template: motor/{}/demand

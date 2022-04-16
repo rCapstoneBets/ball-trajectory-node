@@ -33,6 +33,10 @@ struct KinematicSoln {
     double timeDelta;
 };
 
+double customLerp(double a, double b, double t){
+    return a + t * (b - a);
+}
+
 class BasicTrajectory : public rclcpp::Node {
  private:
     // subscriber for reciever position
@@ -54,8 +58,13 @@ class BasicTrajectory : public rclcpp::Node {
 
     // range lookup table for wheel velocity bands
     // input is range in m (rounded to 0.5 m increments)
-    std::map<double, double> rangeLUT = {};
-    double lutStep = 0.5, wheelRatio;
+    std::vector<double> rangeLUT = {};
+    double rangeLutStep = 0.5;
+
+    // Lookup table for solving a velocity to its non-linear counterpart
+    std::vector<double> velLUT = {};
+    double velLutStep = 1.0;
+    
     
     // solver parameters 
     double maxSolve, solveStep, solvePeriod;
@@ -74,7 +83,9 @@ class BasicTrajectory : public rclcpp::Node {
 
         declare_parameter("range_lut.step", 0.5);
         declare_parameter("range_lut.values", std::vector<double>{0.0, 0.5});
-        declare_parameter("range_lut.ratio", 0.2794 * 3);
+
+        declare_parameter("vel_lut.step", 3.0);
+        declare_parameter("vel_lut.values", std::vector<double>{0.0, 0.5});
 
         declare_parameter("solver.run_period", 0.25);
         declare_parameter("solver.min_pose_samples", 1);
@@ -105,15 +116,23 @@ class BasicTrajectory : public rclcpp::Node {
         RCLCPP_DEBUG(get_logger(), "Initializing range lut params");
 
         // init LUT based on step increments
-        wheelRatio = get_parameter("range_lut.ratio").as_double();
-        lutStep = get_parameter("range_lut.step").as_double();
+        rangeLutStep = get_parameter("range_lut.step").as_double();
 
         auto lutInit = get_parameter("range_lut.values").as_double_array();
         for (int i = 0; i < lutInit.size(); i++) {
-            rangeLUT.insert({i, lutInit.at(i)});
+            rangeLUT.push_back(lutInit.at(i));
         }
 
-        RCLCPP_INFO(get_logger(), "Using LUT step value of %f m / value with max range of %f m", lutStep, lutStep * rangeLUT.size());
+        RCLCPP_INFO(get_logger(), "Using LUT step value of %f m / value with max range of %f m", rangeLutStep, rangeLutStep * rangeLUT.size());
+
+        RCLCPP_DEBUG(get_logger(), "Initializing velocity lut params");
+
+        velLutStep = get_parameter("vel_lut.step").as_double();
+
+        lutInit = get_parameter("vel_lut.values").as_double_array();
+        for (int i = 0; i < lutInit.size(); i++) {
+            velLUT.push_back(lutInit.at(i));
+        }
 
         RCLCPP_DEBUG(get_logger(), "Initializing predictor params");
 
@@ -188,7 +207,7 @@ class BasicTrajectory : public rclcpp::Node {
      * @return double the output velocity of the flywheels in m/s
      */
     double lookupBallVel(double range) {
-        int step = (int)(range / lutStep);
+        int step = (int)(range / rangeLutStep);
         if(step > rangeLUT.size()){
             RCLCPP_ERROR(get_logger(), "Range outside of Lookup table, got value: %i with LUT size: %i for range %f", step, rangeLUT.size(), range);
             return rangeLUT.at(rangeLUT.size() - 1);
@@ -197,7 +216,10 @@ class BasicTrajectory : public rclcpp::Node {
     }
 
     double linearVeltoAngVel(double linear){
-        return linear * wheelRatio;
+        size_t lowerPt = std::floor(linear / velLutStep);
+        size_t upperPt = lowerPt + 1;
+        double interp = std::fmod(linear, velLutStep) / velLutStep; // interpolant
+        return customLerp(velLUT.at(lowerPt), velLUT.at(upperPt), interp); // linearly interpolate between points
     }
 
     KinematicSoln calcToTarget(const geometry_msgs::msg::Pose::SharedPtr newPose) {
